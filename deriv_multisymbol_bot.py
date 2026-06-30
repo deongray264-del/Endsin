@@ -84,7 +84,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
 # ── Contract parameters ───────────────────────────────────────────────────
-BASE_STAKE        = 0.35      # Deriv minimum
+BASE_STAKE        = 1.0      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
@@ -95,14 +95,14 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 # ── Martingale staking (per-symbol, independent streak tracking) ──────────
 MG_ENABLED        = True
 MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
-MG_MAX_STEPS      = 3      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 1.18
+MG_MAX_STEPS      = 4      # cap — step 4 onward stays at step-3 stake
+MG_FACTOR         = 3.89
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
 
 # ── Signal confirmation (reduces trade frequency / false positives) ───────
-CONFIRM_REQUIRED      = 3      # consecutive passes the top candidate must survive
+CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survive
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
