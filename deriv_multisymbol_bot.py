@@ -115,13 +115,21 @@ MC_SIMULATIONS   = 75_000
 MC_CI_PERCENTILE = 5
 MC_REQUIRED_WIN  = 0.58    # MC floor; proposal API is the real payout gate
 MC_REQUIRED_CI   = 0.56
-MC_MAX_WIN_PROB  = 0.93    # ceiling — live testing showed Deriv reliably
-                            # rejects EXPIRYRANGE proposals above ~0.92-0.95
-                            # win_prob with "This contract offers no return."
-                            # 6/6 confirmed candidates at win_prob=0.98-0.99
-                            # were rejected outright on 2026-06-30. This caps
-                            # the grid so the optimizer doesn't waste a full
-                            # confirmation cycle on barriers Deriv won't quote.
+# Ceiling derived from MIN_NET_PAYOUT math, not guessed. Under ~fair odds,
+# payout ~ stake/win_prob, so net = stake/win_prob - stake. Solving
+# stake/win_prob - stake = MIN_NET_PAYOUT gives the win_prob ABOVE WHICH a
+# contract can never clear MIN_NET_PAYOUT, even before Deriv's house margin
+# tightens it further. Live data on 2026-06-30 confirmed this: win_prob 0.91-
+# 0.99 candidates either got "no return" outright or net=$0.01-0.02, both far
+# under the $0.182 floor. The previous MC_MAX_WIN_PROB=0.93 was a guess based
+# on where outright rejections started, not on where the payout math actually
+# breaks down (~0.66) — it let through a whole band (0.66-0.93) of candidates
+# that were mathematically guaranteed to fail the proposal check.
+MC_FAIR_ODDS_CEIL = BASE_STAKE / (BASE_STAKE + MIN_NET_PAYOUT)   # ≈ 0.658
+MC_MAX_WIN_PROB   = MC_FAIR_ODDS_CEIL - 0.03   # small safety margin below the
+                                                 # theoretical cliff, since real
+                                                 # Deriv pricing includes house
+                                                 # margin (worse than fair odds)
 MC_BATCH_SIZE    = 25_000
 
 # ── Sweep grids ───────────────────────────────────────────────────────────
