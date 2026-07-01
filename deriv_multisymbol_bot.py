@@ -160,7 +160,7 @@ ASYM_SIDE_MIN_FRAC = 0.50
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.020             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.012             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
@@ -169,7 +169,7 @@ DIR_OVERLAY_BIAS_FLOOR = 0.020             # |bias| must be >= this to trigger
                                              # using it would mean overlay never
                                              # fires. 0.020 = the real top-end
                                              # signal on these symbols.
-DIR_OVERLAY_STAKE_FRAC = 0.50              # CALL/PUT stake = 50% of EXPIRYRANGE
+DIR_OVERLAY_STAKE_FRAC = 0.99              # CALL/PUT stake = 50% of EXPIRYRANGE
                                              # stake (secondary position)
 DIR_OVERLAY_MIN_PAYOUT = 0.05              # lower payout floor for CALL/PUT
 
