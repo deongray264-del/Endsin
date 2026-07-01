@@ -84,7 +84,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
 # ── Contract parameters ───────────────────────────────────────────────────
-BASE_STAKE        = 1.0      # Deriv minimum
+BASE_STAKE        = 0.35      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
@@ -95,14 +95,14 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 # ── Martingale staking (per-symbol, independent streak tracking) ──────────
 MG_ENABLED        = True
 MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
-MG_MAX_STEPS      = 4      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 3.89
+MG_MAX_STEPS      = 3      # cap — step 4 onward stays at step-3 stake
+MG_FACTOR         = 1.18
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
 
 # ── Signal confirmation (reduces trade frequency / false positives) ───────
-CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survive
+CONFIRM_REQUIRED      = 3      # consecutive passes the top candidate must survive
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
@@ -153,6 +153,25 @@ BIAS_MAX           = 0.35    # cap bias magnitude (prevents degenerate barriers)
 ASYM_RATIO_GRID    = [0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30]
 # Neither side can be less than this fraction of the symmetric barrier_abs
 ASYM_SIDE_MIN_FRAC = 0.50
+
+# ── Directional overlay (CALL/PUT alongside EXPIRYRANGE) ─────────────────
+# Only fires when |bias| hits BIAS_MAX exactly (saturated cap = max observed
+# drift signal). At lower bias values the directional edge is too weak on
+# these mean-reverting synthetic indices — data showed |bias| barely reached
+# 0.025 on average; only cap-saturated events are worth betting directionally.
+DIR_OVERLAY_ENABLED    = True
+DIR_OVERLAY_BIAS_FLOOR = 0.020             # |bias| must be >= this to trigger
+                                             # the overlay. Derived from actual
+                                             # trade data (129 trades): max
+                                             # observed bias was 0.0254, only 2
+                                             # trades exceeded 0.020 (top 1.5%).
+                                             # BIAS_MAX=0.35 cap was never hit —
+                                             # using it would mean overlay never
+                                             # fires. 0.020 = the real top-end
+                                             # signal on these symbols.
+DIR_OVERLAY_STAKE_FRAC = 0.50              # CALL/PUT stake = 50% of EXPIRYRANGE
+                                             # stake (secondary position)
+DIR_OVERLAY_MIN_PAYOUT = 0.05              # lower payout floor for CALL/PUT
 
 # ── Per-symbol gate thresholds ────────────────────────────────────────────
 SYMBOL_CONFIG = {
@@ -307,6 +326,26 @@ class SupabaseStore:
         since = (datetime.now(timezone.utc) - timedelta(days=days)).isoformat()
         return self._select("bot_expiryrange_log",
             f"select=*&symbol=eq.{symbol}&ts=gte.{since}&order=ts.asc")
+
+    def log_overlay(self, rec: dict):
+        """Logs a directional overlay (CALL/PUT) trade to bot_overlay_log."""
+        payload = {
+            "ts":              datetime.now(timezone.utc).isoformat(),
+            "symbol":          rec["symbol"],
+            "direction":       rec["direction"],
+            "entry_price":     round(float(rec["entry_price"]),      5),
+            "duration_secs":   int(rec["duration_secs"]),
+            "stake":           round(float(rec["stake"]),            4),
+            "bias":            round(float(rec["bias"]),             5),
+            "bias_floor_used": round(float(rec["bias_floor_used"]),  4),
+            "er_win_prob":     round(float(rec["er_win_prob"]),      4),
+            "er_upper_ratio":  round(float(rec["er_upper_ratio"]),   4),
+            "er_lower_ratio":  round(float(rec["er_lower_ratio"]),   4),
+            "won":             bool(rec["won"]),
+            "profit":          round(float(rec["profit"]),           4),
+            "ask_price":       round(float(rec.get("ask_price", 0)), 4),
+        }
+        self._insert("bot_overlay_log", payload)
 
 
 # =============================================================================
@@ -508,6 +547,10 @@ class BotState:
         self.session_trades:  Dict[str, int]   = {s: 0   for s in SYMBOLS}
         self.session_wins:    Dict[str, int]   = {s: 0   for s in SYMBOLS}
         self.session_profit:  Dict[str, float] = {s: 0.0 for s in SYMBOLS}
+        # Directional overlay session tracking (separate from EXPIRYRANGE stats)
+        self.overlay_trades:  Dict[str, int]   = {s: 0   for s in SYMBOLS}
+        self.overlay_wins:    Dict[str, int]   = {s: 0   for s in SYMBOLS}
+        self.overlay_profit:  Dict[str, float] = {s: 0.0 for s in SYMBOLS}
         # Martingale tracking — independent per symbol, resets on any win
         self.consec_losses:  Dict[str, int] = {s: 0 for s in SYMBOLS}
         self.mg_step:        Dict[str, int] = {s: 0 for s in SYMBOLS}
@@ -1207,6 +1250,18 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
 
         print(f"[Buy] Contract id={contract_id} -- waiting {duration_secs}s...")
 
+        # Fire directional overlay concurrently if bias is at max observed level.
+        # asyncio.create_task lets it run alongside the EXPIRYRANGE settlement
+        # poll below — both contracts settle at the same time since they share
+        # the same duration. The overlay does NOT block EXPIRYRANGE result logging.
+        bias_now = candidate.get("bias", 0.0)
+        if DIR_OVERLAY_ENABLED and abs(bias_now) >= DIR_OVERLAY_BIAS_FLOOR:
+            asyncio.create_task(
+                execute_directional_overlay(
+                    client, state, symbol, candidate,
+                    duration_secs, store)
+            )
+
         deadline = time.time() + duration_secs + 30
         while time.time() < deadline:
             await asyncio.sleep(5)
@@ -1296,6 +1351,181 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
         "ask_price":     ask_price,
     })
     return won, profit, True
+
+
+# =============================================================================
+# DIRECTIONAL OVERLAY  — CALL/PUT fired alongside EXPIRYRANGE on max-bias events
+# =============================================================================
+async def execute_directional_overlay(client: DerivClient, state: BotState,
+                                      symbol: str, candidate: dict,
+                                      er_duration_secs: int,
+                                      store: SupabaseStore) -> None:
+    """
+    Fires a CALL (bias > 0, upper wider) or PUT (bias < 0, lower wider)
+    contract for the same duration as the parent EXPIRYRANGE, using
+    DIR_OVERLAY_STAKE_FRAC * EXPIRYRANGE_stake.
+
+    Called ONLY when |bias| >= DIR_OVERLAY_BIAS_FLOOR. The EXPIRYRANGE
+    contract has already been submitted — this runs concurrently after
+    the buy call returns, so it does not block EXPIRYRANGE settlement.
+
+    Logic:
+      bias > 0  →  asymmetry pushed upper barrier up  →  CALL
+                   (price drifted up over BIAS_LOOKBACK ticks and MC
+                    expects it to continue; CALL wins if price ends above
+                    entry at expiry)
+      bias < 0  →  asymmetry pushed lower barrier down →  PUT
+                   (price drifted down; PUT wins if price ends below entry)
+
+    The two contracts are complementary but NOT a perfect hedge:
+      - If price stays inside the EXPIRYRANGE window AND drifts in the
+        bias direction: BOTH win.
+      - If price drifts strongly in the bias direction but breaks the
+        opposite barrier: EXPIRYRANGE loses, CALL/PUT wins (partial offset).
+      - If price moves against the bias: EXPIRYRANGE may still win (wide
+        window), CALL/PUT loses (small secondary stake = limited downside).
+    """
+    bias = candidate.get("bias", 0.0)
+    if not DIR_OVERLAY_ENABLED:
+        return
+    if abs(bias) < DIR_OVERLAY_BIAS_FLOOR:
+        return
+
+    direction = "CALL" if bias > 0 else "PUT"
+    er_stake  = state.next_stake(symbol)           # same stake logic as parent
+    overlay_stake = round(er_stake * DIR_OVERLAY_STAKE_FRAC, 2)
+    overlay_stake = max(overlay_stake, 0.35)       # Deriv minimum stake floor
+
+    price_now = state.last_price[symbol]
+
+    print(f"\n[Overlay] {symbol}: bias={bias:+.4f} >= floor={DIR_OVERLAY_BIAS_FLOOR:.3f} "
+          f"-- firing {direction} overlay  "
+          f"stake=${overlay_stake:.2f}  dur={er_duration_secs}s")
+
+    # ── Proposal check ────────────────────────────────────────────────────
+    try:
+        prop_resp = await client.send({
+            "proposal":      1,
+            "amount":        overlay_stake,
+            "basis":         "stake",
+            "contract_type": direction,
+            "currency":      "USD",
+            "duration":      er_duration_secs,
+            "duration_unit": "s",
+            "symbol":        symbol,
+        }, timeout=12)
+
+        if "error" in prop_resp:
+            err = prop_resp["error"].get("message", str(prop_resp["error"]))
+            print(f"[Overlay] {symbol} proposal error: {err} -- skipping overlay")
+            return
+
+        prop      = prop_resp.get("proposal", {})
+        payout    = float(prop.get("payout",    0))
+        ask_price = float(prop.get("ask_price", overlay_stake))
+        net_profit_est = payout - ask_price
+
+        if net_profit_est < DIR_OVERLAY_MIN_PAYOUT * (overlay_stake / 0.35):
+            print(f"[Overlay] {symbol}: net=${net_profit_est:.4f} below overlay floor "
+                  f"-- skipping")
+            return
+
+        print(f"[Overlay] {symbol}: proposal OK  payout=${payout:.4f}  "
+              f"ask=${ask_price:.4f}  est_net=${net_profit_est:.4f}")
+
+    except Exception as e:
+        print(f"[Overlay] {symbol} proposal exception: {e} -- skipping overlay")
+        return
+
+    # ── Buy ───────────────────────────────────────────────────────────────
+    won, profit, contract_id = False, 0.0, None
+    try:
+        buy_resp = await client.send({
+            "buy":   "1",
+            "price": ask_price,
+            "parameters": {
+                "amount":           overlay_stake,
+                "basis":            "stake",
+                "contract_type":    direction,
+                "currency":         "USD",
+                "duration":         er_duration_secs,
+                "duration_unit":    "s",
+                "symbol":           symbol,
+            },
+        }, timeout=30)
+
+        if "error" in buy_resp:
+            err = buy_resp["error"].get("message", str(buy_resp["error"]))
+            print(f"[Overlay] {symbol} buy error: {err}")
+            return
+
+        contract_id = buy_resp.get("buy", {}).get("contract_id")
+        if not contract_id:
+            print(f"[Overlay] {symbol}: no contract_id")
+            return
+
+        print(f"[Overlay] Contract id={contract_id} -- "
+              f"settling alongside EXPIRYRANGE in {er_duration_secs}s...")
+
+        # ── Wait for settlement ───────────────────────────────────────────
+        deadline = time.time() + er_duration_secs + 30
+        while time.time() < deadline:
+            await asyncio.sleep(5)
+            try:
+                poll   = await client.send(
+                    {"proposal_open_contract": 1,
+                     "contract_id": contract_id}, timeout=12)
+                poc    = poll.get("proposal_open_contract", {})
+                status = poc.get("status")
+                if (status == "sold" or
+                        poc.get("is_expired") or
+                        poc.get("is_settleable")):
+                    profit = float(poc.get("profit", 0.0))
+                    won    = profit > 0
+                    break
+            except Exception:
+                pass
+
+    except Exception as e:
+        print(f"[Overlay] {symbol} buy exception: {e}")
+        return
+
+    # ── Result ────────────────────────────────────────────────────────────
+    state.overlay_trades[symbol]  = state.overlay_trades.get(symbol, 0) + 1
+    state.overlay_wins[symbol]    = state.overlay_wins.get(symbol, 0) + (1 if won else 0)
+    state.overlay_profit[symbol]  = state.overlay_profit.get(symbol, 0.0) + profit
+
+    ov_wr  = state.overlay_wins[symbol] / max(state.overlay_trades[symbol], 1)
+    result = f"WIN  +${profit:.4f}" if won else f"LOSS  -${ask_price:.4f}"
+    SEP    = "-" * 68
+    print(f"\n{SEP}")
+    print(f"  OVERLAY RESULT  {symbol}  {direction}  "
+          f"{datetime.now(timezone.utc).isoformat()}")
+    print(SEP)
+    print(f"  Contract   : {contract_id}")
+    print(f"  Bias       : {bias:+.4f}  ({direction})")
+    print(f"  Outcome    : {result}")
+    print(f"  Overlay session: {state.overlay_wins[symbol]}/"
+          f"{state.overlay_trades[symbol]} ({ov_wr:.1%})  "
+          f"net=${state.overlay_profit[symbol]:+.2f}")
+    print(SEP + "\n")
+
+    # ── Log to Supabase ───────────────────────────────────────────────────
+    store.log_overlay({
+        "symbol":          symbol,
+        "direction":       direction,
+        "entry_price":     price_now,
+        "duration_secs":   er_duration_secs,
+        "stake":           overlay_stake,
+        "bias":            bias,
+        "bias_floor_used": DIR_OVERLAY_BIAS_FLOOR,
+        "er_win_prob":     candidate.get("win_prob", 0.0),
+        "er_upper_ratio":  candidate.get("upper_ratio", 1.0),
+        "er_lower_ratio":  candidate.get("lower_ratio", 1.0),
+        "won":             won,
+        "profit":          profit,
+        "ask_price":       ask_price,
+    })
 
 
 # =============================================================================
