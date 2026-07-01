@@ -84,7 +84,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
 # ── Contract parameters ───────────────────────────────────────────────────
-BASE_STAKE        = 0.35      # Deriv minimum
+BASE_STAKE        = 0.4      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
@@ -96,7 +96,7 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 MG_ENABLED        = True
 MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
 MG_MAX_STEPS      = 2      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 1.18
+MG_FACTOR         = 1.3
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
@@ -160,7 +160,7 @@ ASYM_SIDE_MIN_FRAC = 0.50
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.012             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.002             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
