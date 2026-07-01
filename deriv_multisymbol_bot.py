@@ -95,8 +95,8 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 # ── Martingale staking (per-symbol, independent streak tracking) ──────────
 MG_ENABLED        = True
 MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
-MG_MAX_STEPS      = 2      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 1.3
+MG_MAX_STEPS      = 3      # cap — step 4 onward stays at step-3 stake
+MG_FACTOR         = 1.18
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
@@ -130,7 +130,7 @@ MC_MAX_WIN_PROB   = MC_FAIR_ODDS_CEIL - 0.03   # small safety margin below the
                                                  # theoretical cliff, since real
                                                  # Deriv pricing includes house
                                                  # margin (worse than fair odds)
-MC_BATCH_SIZE    = 75_000
+MC_BATCH_SIZE    = 25_000
 
 # ── Sweep grids ───────────────────────────────────────────────────────────
 DURATION_CANDIDATES = [120, 300, 240, 420, 180, 360, 480]   # ordered by empirical
@@ -160,7 +160,7 @@ ASYM_SIDE_MIN_FRAC = 0.50
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.003             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.020             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
@@ -190,7 +190,7 @@ SYMBOL_CONFIG = {
     },
     "RDBEAR": {
         "ticks_per_sec":     1.0,
-        "max_adx":           10,     # was 18 — never fired; observed live range was
+        "max_adx":           8,     # was 18 — never fired; observed live range was
                                      # 4.3-10.7 (mean 6.9). 8 sits just above the 75th
                                      # percentile (7.67) so it filters genuine trend
                                      # spikes without blocking normal conditions.
@@ -1391,30 +1391,7 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
     if abs(bias) < DIR_OVERLAY_BIAS_FLOOR:
         return
 
-    # Direction must come from the ACTUAL selected candidate's barrier
-    # geometry (upper_ratio vs lower_ratio), not from the raw bias scalar.
-    # `bias` is a single global drift reading shared by every candidate a
-    # given mc_auto_optimize() call produces; which (upper_ratio, lower_ratio)
-    # pair ends up as the top-ranked candidate is driven mostly by win_prob
-    # (the asym_alignment bonus is a <=2% nudge even at max bias), so the
-    # winning candidate's asymmetry can legitimately point the opposite way
-    # from the bias sign. Firing the overlay off `bias` alone can then bet
-    # CALL/PUT against the very barrier skew that was just priced in.
-    asym = candidate.get("upper_ratio", 1.0) - candidate.get("lower_ratio", 1.0)
-    if abs(asym) < 1e-9:
-        return  # symmetric candidate -- no directional geometry to overlay on
-
-    geometry_direction = "CALL" if asym > 0 else "PUT"
-    bias_direction      = "CALL" if bias > 0 else "PUT"
-    if geometry_direction != bias_direction:
-        print(f"[Overlay] {symbol}: SKIPPED -- bias signal says {bias_direction} "
-              f"({bias:+.4f}) but the selected candidate's barrier asymmetry "
-              f"says {geometry_direction} (upper_ratio={candidate['upper_ratio']:.2f} "
-              f"lower_ratio={candidate['lower_ratio']:.2f}) -- disagreement means "
-              f"there's no confident directional read, not firing")
-        return
-
-    direction = geometry_direction
+    direction = "CALL" if bias > 0 else "PUT"
     er_stake  = state.next_stake(symbol)           # same stake logic as parent
     overlay_stake = round(er_stake * DIR_OVERLAY_STAKE_FRAC, 2)
     overlay_stake = max(overlay_stake, 0.35)       # Deriv minimum stake floor
@@ -1435,7 +1412,7 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
             "currency":      "USD",
             "duration":      er_duration_secs,
             "duration_unit": "s",
-            "underlying_symbol": symbol,
+            "symbol":        symbol,
         }, timeout=12)
 
         if "error" in prop_resp:
@@ -1467,13 +1444,13 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
             "buy":   "1",
             "price": ask_price,
             "parameters": {
-                "amount":              overlay_stake,
-                "basis":               "stake",
-                "contract_type":       direction,
-                "currency":            "USD",
-                "duration":            er_duration_secs,
-                "duration_unit":       "s",
-                "underlying_symbol":   symbol,
+                "amount":           overlay_stake,
+                "basis":            "stake",
+                "contract_type":    direction,
+                "currency":         "USD",
+                "duration":         er_duration_secs,
+                "duration_unit":    "s",
+                "symbol":           symbol,
             },
         }, timeout=30)
 
