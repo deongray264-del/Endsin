@@ -84,7 +84,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
 # ── Contract parameters ───────────────────────────────────────────────────
-BASE_STAKE        = 0.40      # Deriv minimum
+BASE_STAKE        = 0.35      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
@@ -96,13 +96,13 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 MG_ENABLED        = True
 MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
 MG_MAX_STEPS      = 2      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 1.30
+MG_FACTOR         = 1.3
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
 
 # ── Signal confirmation (reduces trade frequency / false positives) ───────
-CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survive
+CONFIRM_REQUIRED      = 3      # consecutive passes the top candidate must survive
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
@@ -1391,7 +1391,30 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
     if abs(bias) < DIR_OVERLAY_BIAS_FLOOR:
         return
 
-    direction = "CALL" if bias > 0 else "PUT"
+    # Direction must come from the ACTUAL selected candidate's barrier
+    # geometry (upper_ratio vs lower_ratio), not from the raw bias scalar.
+    # `bias` is a single global drift reading shared by every candidate a
+    # given mc_auto_optimize() call produces; which (upper_ratio, lower_ratio)
+    # pair ends up as the top-ranked candidate is driven mostly by win_prob
+    # (the asym_alignment bonus is a <=2% nudge even at max bias), so the
+    # winning candidate's asymmetry can legitimately point the opposite way
+    # from the bias sign. Firing the overlay off `bias` alone can then bet
+    # CALL/PUT against the very barrier skew that was just priced in.
+    asym = candidate.get("upper_ratio", 1.0) - candidate.get("lower_ratio", 1.0)
+    if abs(asym) < 1e-9:
+        return  # symmetric candidate -- no directional geometry to overlay on
+
+    geometry_direction = "CALL" if asym > 0 else "PUT"
+    bias_direction      = "CALL" if bias > 0 else "PUT"
+    if geometry_direction != bias_direction:
+        print(f"[Overlay] {symbol}: SKIPPED -- bias signal says {bias_direction} "
+              f"({bias:+.4f}) but the selected candidate's barrier asymmetry "
+              f"says {geometry_direction} (upper_ratio={candidate['upper_ratio']:.2f} "
+              f"lower_ratio={candidate['lower_ratio']:.2f}) -- disagreement means "
+              f"there's no confident directional read, not firing")
+        return
+
+    direction = geometry_direction
     er_stake  = state.next_stake(symbol)           # same stake logic as parent
     overlay_stake = round(er_stake * DIR_OVERLAY_STAKE_FRAC, 2)
     overlay_stake = max(overlay_stake, 0.35)       # Deriv minimum stake floor
