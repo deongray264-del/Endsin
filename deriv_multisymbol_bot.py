@@ -190,7 +190,7 @@ SYMBOL_CONFIG = {
     },
     "RDBEAR": {
         "ticks_per_sec":     1.0,
-        "max_adx":           8,     # was 18 — never fired; observed live range was
+        "max_adx":           10,     # was 18 — never fired; observed live range was
                                      # 4.3-10.7 (mean 6.9). 8 sits just above the 75th
                                      # percentile (7.67) so it filters genuine trend
                                      # spikes without blocking normal conditions.
