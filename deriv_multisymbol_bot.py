@@ -83,6 +83,25 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 # ── Symbols ───────────────────────────────────────────────────────────────
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
+# ── Logging ───────────────────────────────────────────────────────────────
+# Default (VERBOSE_LOGS unset/0): only three kinds of things get printed --
+#   1. a signal being found  ("[EV] ...: selected best-EV candidate ...")
+#   2. a trade entry         (the EXPIRYRANGE/[Buy]/[Overlay] fire lines)
+#   3. a trade result        (RESULT / OVERLAY RESULT blocks)
+# Everything else this bot used to print every cycle -- gate-blocked cycles,
+# regime classification, per-candidate MC/EV scoring detail, GARCH refits,
+# confirmation-streak progress, Supabase upsert confirmations -- is routine
+# diagnostic noise that dominated the Railway log volume without changing
+# what the bot did. That noise now goes through vlog() instead of print()
+# and is silent unless VERBOSE_LOGS=1 is set (e.g. while debugging locally).
+# Set VERBOSE_LOGS=1 as a Railway env var to get the old fully-verbose output
+# back at any time -- no code change needed.
+VERBOSE_LOGS = os.getenv("VERBOSE_LOGS", "0").strip().lower() in ("1", "true", "yes")
+
+def vlog(*args, **kwargs):
+    if VERBOSE_LOGS:
+        print(*args, **kwargs)
+
 # ── Contract parameters ───────────────────────────────────────────────────
 BASE_STAKE        = 1.0      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
@@ -303,7 +322,7 @@ class SupabaseStore:
         self.url = SUPABASE_URL
         self.key = SUPABASE_KEY
         self.ok  = bool(self.url and self.key)
-        print(f"[Store] {'Active -> ' + self.url if self.ok else 'No creds — state will not persist.'}")
+        vlog(f"[Store] {'Active -> ' + self.url if self.ok else 'No creds — state will not persist.'}")
 
     def _hdr(self, prefer="return=minimal"):
         return {"apikey": self.key, "Authorization": f"Bearer {self.key}",
@@ -483,7 +502,7 @@ class DerivClient:
     def _fetch_otp_url_sync(self):
         if not self.account_id:
             self.account_id = self._resolve_account_id_sync()
-            print(f"Resolved {self.account_type} account_id = {self.account_id}")
+            vlog(f"Resolved {self.account_type} account_id = {self.account_id}")
         resp = requests.post(
             f"{API_BASE}{OTP_PATH.format(account_id=self.account_id)}",
             headers=self._rest_headers(), timeout=15)
@@ -511,7 +530,7 @@ class DerivClient:
         self._ka_task     = asyncio.create_task(self._heartbeat())
         bal          = await self.send({"balance": 1})
         self.account = bal.get("balance", {})
-        print(f"Connected ({self.account_type}). "
+        vlog(f"Connected ({self.account_type}). "
               f"loginid={self.account.get('loginid')} "
               f"balance=${self.account.get('balance'):.2f}")
 
@@ -787,10 +806,10 @@ def estimate_abs_vol_per_tick(prices: np.ndarray, returns: np.ndarray,
                 used_garch = True
                 return float(abs_vol), vol_trust, used_garch
             else:
-                print(f"[Vol] GARCH abs_vol={abs_vol:.5f} outside [{lo_bound:.5f},{hi_bound:.5f}]"
+                vlog(f"[Vol] GARCH abs_vol={abs_vol:.5f} outside [{lo_bound:.5f},{hi_bound:.5f}]"
                       f" — falling back to baseline={baseline_abs:.5f}")
         except Exception as e:
-            print(f"[Vol] GARCH forecast error: {e}")
+            vlog(f"[Vol] GARCH forecast error: {e}")
 
     # Fallback: direct std of price differences
     return baseline_abs, 0.5, False
@@ -812,7 +831,7 @@ def fit_garch(returns: np.ndarray):
                  contextlib.redirect_stderr(io.StringIO()):
                 return am.fit(disp="off")
     except Exception as e:
-        print(f"[GARCH] fit failed: {e}")
+        vlog(f"[GARCH] fit failed: {e}")
         return None
 
 
@@ -1182,14 +1201,14 @@ def mc_auto_optimize(prices: np.ndarray, price_diffs: np.ndarray,
     regime = classify_regime(symbol, gate_info) if gate_info else REGIME_MEAN_REVERT
     dur_grid   = REGIME_DURATIONS[regime]
     sigma_grid = REGIME_SIGMAS[regime]
-    print(f"[Regime] {symbol}: {regime}  "
+    vlog(f"[Regime] {symbol}: {regime}  "
           f"(durations={dur_grid}  sigmas={len(sigma_grid)} values)")
 
     # ── Bootstrap pool (built once, reused for every candidate this cycle) ─
     pool = BootstrapPool(price_diffs, abs_vol)
     rng  = np.random.default_rng()
     if not pool.usable:
-        print(f"[MC] {symbol}: bootstrap pool not usable "
+        vlog(f"[MC] {symbol}: bootstrap pool not usable "
               f"({len(price_diffs)} ticks available, need >= "
               f"{MIN_TICKS_FOR_BOOTSTRAP}) -- falling back to Gaussian MC")
 
@@ -1202,7 +1221,7 @@ def mc_auto_optimize(prices: np.ndarray, price_diffs: np.ndarray,
     bias_str = (f"UP  {bias:+.3f}" if bias >  0.02 else
                 f"DN  {bias:+.3f}" if bias < -0.02 else
                 f"FLAT {bias:+.3f}")
-    print(f"[MC] {symbol}  bias={bias_str}  drift/tick={drift_per_tick:+.5f}  "
+    vlog(f"[MC] {symbol}  bias={bias_str}  drift/tick={drift_per_tick:+.5f}  "
           f"abs_vol={abs_vol:.5f}  ({'GARCH' if used_garch else 'baseline'})")
 
     # ── Build asymmetry pairs biased toward drift direction ───────────────
@@ -1394,7 +1413,7 @@ async def fetch_proposal_payout(client: DerivClient, symbol: str,
 
         if "error" in resp:
             err = resp["error"].get("message", str(resp["error"]))
-            print(f"[Proposal] {symbol} error: {err}")
+            vlog(f"[Proposal] {symbol} error: {err}")
             return None, stake
 
         prop      = resp.get("proposal", {})
@@ -1408,14 +1427,14 @@ async def fetch_proposal_payout(client: DerivClient, symbol: str,
 
         # Sanity: net profit > 20x stake is impossible on EXPIRYRANGE
         if net_profit > stake * 20:
-            print(f"[Proposal] {symbol}: suspicious net_profit=${net_profit:.4f} "
+            vlog(f"[Proposal] {symbol}: suspicious net_profit=${net_profit:.4f} "
                   f"(payout={payout}, ask={ask_price}) — skipping")
             return None, stake
 
         return net_profit, ask_price
 
     except Exception as e:
-        print(f"[Proposal] {symbol} exception: {e}")
+        vlog(f"[Proposal] {symbol} exception: {e}")
         return None, stake
 
 
@@ -1460,14 +1479,14 @@ async def rank_candidates_by_ev(client: DerivClient, state: BotState,
         if net_payout is None:
             continue
         if net_payout < floor:
-            print(f"[EV] {symbol}: dur={cand['duration_secs']}s "
+            vlog(f"[EV] {symbol}: dur={cand['duration_secs']}s "
                   f"sigma={cand['barrier_sigma']:.2f} net=${net_payout:.4f} "
                   f"< floor ${floor:.4f} -- excluded")
             continue
 
         wp = cand["win_prob"]
         ev = wp * net_payout - (1 - wp) * ask_price
-        print(f"[EV] {symbol}: dur={cand['duration_secs']}s "
+        vlog(f"[EV] {symbol}: dur={cand['duration_secs']}s "
               f"sigma={cand['barrier_sigma']:.2f} win={wp:.3f} "
               f"net=${net_payout:.4f} -> ev=${ev:+.4f}")
         results.append((cand, net_payout, ask_price, ev))
@@ -1518,13 +1537,13 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
             client, symbol, upper, lower, duration_secs, stake)
 
     if net_payout is not None and net_payout < MIN_NET_PAYOUT * (stake / BASE_STAKE):
-        print(f"[Proposal] {symbol}: net=${net_payout:.4f} < "
+        vlog(f"[Proposal] {symbol}: net=${net_payout:.4f} < "
               f"${MIN_NET_PAYOUT * (stake / BASE_STAKE):.4f} "
               f"(barrier too wide) — trying next candidate")
         return False, 0.0, False
 
     if net_payout is None:
-        print(f"[Proposal] {symbol}: API failed — skipping candidate")
+        vlog(f"[Proposal] {symbol}: API failed — skipping candidate")
         return False, 0.0, False
 
     SEP = "-" * 68
@@ -1537,9 +1556,9 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
     mg_tag = (f"MARTINGALE step={state.mg_step.get(symbol,0)+1}/{MG_MAX_STEPS} "
               f"(after {state.consec_losses.get(symbol,0)} consec losses)"
               if mg_active else "base stake")
-    print(f"\n{SEP}")
+    vlog(f"\n{SEP}")
     print(f"  EXPIRYRANGE  {symbol}  {datetime.now(timezone.utc).isoformat()}")
-    print(SEP)
+    vlog(SEP)
     print(f"  Entry         : {price_now:.5f}")
     print(f"  Upper barrier : {upper:.5f}  (+{upper_abs:.5f} from spot)")
     print(f"  Lower barrier : {lower:.5f}  (-{lower_abs:.5f} from spot)")
@@ -1560,7 +1579,7 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
           f"vol_trust={gate_info['vol_trust']:.3f}  "
           f"hawkes={gate_info['hawkes_val']:.3f}  "
           f"mbs={gate_info['mbs_val']:.3f}")
-    print(SEP)
+    vlog(SEP)
 
     won, profit, contract_id = False, 0.0, None
     try:
@@ -1637,15 +1656,15 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
 
     wr     = state.session_wins[symbol] / max(state.session_trades[symbol], 1)
     result = f"WIN  +${profit:.4f}" if won else f"LOSS  -${ask_price:.4f}"
-    print(f"\n{SEP}")
+    vlog(f"\n{SEP}")
     print(f"  RESULT  {symbol}  {datetime.now(timezone.utc).isoformat()}")
-    print(SEP)
+    vlog(SEP)
     print(f"  Contract   : {contract_id}")
     print(f"  Outcome    : {result}")
     print(f"  Stake used : ${stake:.2f}  next_stake=${state.next_stake(symbol):.2f}")
     print(f"  Session    : {state.session_wins[symbol]}/{state.session_trades[symbol]} "
           f"({wr:.1%})  net=${state.session_profit[symbol]:+.2f}")
-    print(SEP + "\n")
+    vlog(SEP + "\n")
 
     # Refresh balance
     try:
@@ -1862,17 +1881,17 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
     ov_wr  = state.overlay_wins[symbol] / max(state.overlay_trades[symbol], 1)
     result = f"WIN  +${profit:.4f}" if won else f"LOSS  -${ask_price:.4f}"
     SEP    = "-" * 68
-    print(f"\n{SEP}")
+    vlog(f"\n{SEP}")
     print(f"  OVERLAY RESULT  {symbol}  {direction}  "
           f"{datetime.now(timezone.utc).isoformat()}")
-    print(SEP)
+    vlog(SEP)
     print(f"  Contract   : {contract_id}")
-    print(f"  Bias       : {bias:+.4f}  ({direction})")
+    vlog(f"  Bias       : {bias:+.4f}  ({direction})")
     print(f"  Outcome    : {result}")
-    print(f"  Overlay session: {state.overlay_wins[symbol]}/"
+    vlog(f"  Overlay session: {state.overlay_wins[symbol]}/"
           f"{state.overlay_trades[symbol]} ({ov_wr:.1%})  "
           f"net=${state.overlay_profit[symbol]:+.2f}")
-    print(SEP + "\n")
+    vlog(SEP + "\n")
 
     # ── Log to Supabase ───────────────────────────────────────────────────
     store.log_overlay({
@@ -1896,21 +1915,21 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
 # DAILY SELF-IMPROVEMENT
 # =============================================================================
 def daily_self_improvement(state: BotState, store: SupabaseStore):
-    print("\n" + "=" * 68)
-    print("  DAILY SELF-IMPROVEMENT  " +
+    vlog("\n" + "=" * 68)
+    vlog("  DAILY SELF-IMPROVEMENT  " +
           datetime.now(timezone.utc).strftime("%Y-%m-%d %H:%M UTC"))
-    print("=" * 68)
+    vlog("=" * 68)
 
     for symbol in SYMBOLS:
         rows = store.load_recent_trades(symbol, days=7)
         if not rows:
-            print(f"[SI] {symbol}: no history in last 7 days, skipping.")
+            vlog(f"[SI] {symbol}: no history in last 7 days, skipping.")
             continue
 
         n_total = len(rows)
         n_wins  = sum(1 for r in rows if r.get("won"))
         profit  = sum(float(r.get("profit", 0)) for r in rows)
-        print(f"\n[SI] {symbol}: {n_total} trades  {n_wins} wins "
+        vlog(f"\n[SI] {symbol}: {n_total} trades  {n_wins} wins "
               f"({n_wins/max(n_total,1):.1%})  net=${profit:+.2f}")
 
         dur_stats: Dict[int,   List[int]] = defaultdict(lambda: [0, 0])
@@ -1941,12 +1960,12 @@ def daily_self_improvement(state: BotState, store: SupabaseStore):
 
         # Duration reweighting
         raw_dw = {}
-        print(f"  Duration win rates:")
+        vlog(f"  Duration win rates:")
         for dur, (w, t) in sorted(dur_stats.items()):
             if t == 0: continue
             bwr = (w + alpha) / (t + 2 * alpha)
             raw_dw[dur] = bwr
-            print(f"    {dur}s: {w}/{t} ({w/t:.1%}) Bayes={bwr:.3f}")
+            vlog(f"    {dur}s: {w}/{t} ({w/t:.1%}) Bayes={bwr:.3f}")
         if raw_dw:
             mx, mn, sp = max(raw_dw.values()), min(raw_dw.values()), 0
             sp = mx - mn
@@ -1960,12 +1979,12 @@ def daily_self_improvement(state: BotState, store: SupabaseStore):
 
         # Barrier reweighting
         raw_bw = {}
-        print(f"  Barrier sigma-slot win rates:")
+        vlog(f"  Barrier sigma-slot win rates:")
         for slot, (w, t) in sorted(bar_stats.items()):
             if t == 0: continue
             bwr = (w + alpha) / (t + 2 * alpha)
             raw_bw[slot] = bwr
-            print(f"    s={slot:.1f}: {w}/{t} ({w/t:.1%}) Bayes={bwr:.3f}")
+            vlog(f"    s={slot:.1f}: {w}/{t} ({w/t:.1%}) Bayes={bwr:.3f}")
         if raw_bw:
             mx, mn = max(raw_bw.values()), min(raw_bw.values())
             sp = mx - mn
@@ -1982,15 +2001,15 @@ def daily_self_improvement(state: BotState, store: SupabaseStore):
             if ratio > 1.08:
                 new_sc = float(np.clip(old_sc * min(ratio, 1.25), 0.5, 4.0))
                 state.vol_scalar[symbol] = new_sc
-                print(f"  Vol scalar UP: MC={mc_mean:.3f} > actual={act_mean:.3f} "
+                vlog(f"  Vol scalar UP: MC={mc_mean:.3f} > actual={act_mean:.3f} "
                       f"-> {old_sc:.3f} -> {new_sc:.3f}")
             elif ratio < 0.92:
                 new_sc = float(np.clip(old_sc * max(ratio, 0.80), 0.5, 4.0))
                 state.vol_scalar[symbol] = new_sc
-                print(f"  Vol scalar DOWN: MC={mc_mean:.3f} < actual={act_mean:.3f} "
+                vlog(f"  Vol scalar DOWN: MC={mc_mean:.3f} < actual={act_mean:.3f} "
                       f"-> {old_sc:.3f} -> {new_sc:.3f}")
             else:
-                print(f"  Vol scalar stable: MC={mc_mean:.3f} ~ actual={act_mean:.3f}")
+                vlog(f"  Vol scalar stable: MC={mc_mean:.3f} ~ actual={act_mean:.3f}")
 
         best_dur = max(dur_stats, key=lambda d: dur_stats[d][0] / max(dur_stats[d][1], 1)) if dur_stats else 120
         best_bar = max(bar_stats, key=lambda b: bar_stats[b][0] / max(bar_stats[b][1], 1)) if bar_stats else 1.0
@@ -2006,8 +2025,8 @@ def daily_self_improvement(state: BotState, store: SupabaseStore):
         {s: state.vol_scalar.get(s, 1.0) for s in SYMBOLS})
 
     state.last_daily_tune = time.time()
-    print("\n[SI] Config saved. Next tuning in ~24h.")
-    print("=" * 68 + "\n")
+    vlog("\n[SI] Config saved. Next tuning in ~24h.")
+    vlog("=" * 68 + "\n")
 
 
 def load_config_from_supabase(state: BotState, store: SupabaseStore):
@@ -2031,9 +2050,9 @@ def load_config_from_supabase(state: BotState, store: SupabaseStore):
                 state.vol_scalar[s] = float(vol_s[s])
                 loaded = True
     if loaded:
-        print(f"[Config] Warm-start loaded. vol_scalars={state.vol_scalar}")
+        vlog(f"[Config] Warm-start loaded. vol_scalars={state.vol_scalar}")
     else:
-        print("[Config] Cold start.")
+        vlog("[Config] Cold start.")
 
 
 # =============================================================================
@@ -2060,7 +2079,7 @@ async def watchdog(state: BotState):
         await asyncio.sleep(30)
         idle = time.time() - state.last_activity
         if idle > WATCHDOG_TIMEOUT:
-            print(f"[Watchdog] No activity for {idle:.0f}s -- restarting.")
+            vlog(f"[Watchdog] No activity for {idle:.0f}s -- restarting.")
             os.execv(sys.executable, [sys.executable] + sys.argv)
 
 
@@ -2081,12 +2100,12 @@ async def main():
                           DERIV_ACCOUNT_TYPE, DERIV_ACCOUNT_ID)
     account = await client.connect()
     state.balance = float(account.get("balance", 0))
-    print(f"Balance: ${state.balance:.2f}")
+    vlog(f"Balance: ${state.balance:.2f}")
 
     sdata: Dict[str, SymbolData] = {s: SymbolData(s) for s in SYMBOLS}
 
     # Bootstrap history
-    print("\nBootstrapping tick history...")
+    vlog("\nBootstrapping tick history...")
     for sym in SYMBOLS:
         ticks = await fetch_history(client, sym, HISTORY_BOOTSTRAP)
         for epoch, price in ticks:
@@ -2094,12 +2113,12 @@ async def main():
         prices = sdata[sym].prices()
         if len(prices):
             state.last_price[sym] = float(prices[-1])
-        print(f"  {sym}: {len(ticks)} ticks loaded  "
+        vlog(f"  {sym}: {len(ticks)} ticks loaded  "
               f"price={state.last_price[sym]:.5f}")
     state.last_activity = time.time()  # reset after bootstrap
 
     # Fit GARCH
-    print("\nFitting GARCH models...")
+    vlog("\nFitting GARCH models...")
     for sym in SYMBOLS:
         returns = sdata[sym].returns()
         if len(returns) >= MIN_TICKS_FOR_FIT:
@@ -2109,36 +2128,36 @@ async def main():
             prices = sdata[sym].prices()
             abs_vol, vol_trust, used_g = estimate_abs_vol_per_tick(
                 prices, returns, gr, state.last_price[sym])
-            print(f"  {sym}: GARCH {'fitted' if gr else 'failed'}  "
+            vlog(f"  {sym}: GARCH {'fitted' if gr else 'failed'}  "
                   f"abs_vol_per_tick={abs_vol:.5f}  "
                   f"({'GARCH' if used_g else 'baseline'})  "
                   f"vol_trust={vol_trust:.3f}")
         else:
             state.garch_cache[sym] = (None, 0.0)
-            print(f"  {sym}: not enough data ({len(returns)} returns)")
+            vlog(f"  {sym}: not enough data ({len(returns)} returns)")
     state.last_activity = time.time()  # reset after GARCH
 
     # Subscribe ticks
     tick_queues: Dict[str, asyncio.Queue] = {}
     for sym in SYMBOLS:
         tick_queues[sym] = await subscribe_ticks(client, sym)
-    print(f"\nSubscribed to: {SYMBOLS}")
+    vlog(f"\nSubscribed to: {SYMBOLS}")
 
     async def resubscribe(c: DerivClient):
         for sym in SYMBOLS:
             tick_queues[sym] = await subscribe_ticks(c, sym)
         bal_resp     = await c.send({"balance": 1})
         state.balance = float(bal_resp.get("balance", {}).get("balance", state.balance))
-        print("[Reconnect] Subscriptions restored.")
+        vlog("[Reconnect] Subscriptions restored.")
 
     client.resubscribe_cb = resubscribe
 
     asyncio.create_task(watchdog(state))
     state.last_activity = time.time()
 
-    print("\n" + "=" * 68)
-    print("  Bot armed -- scanning for EXPIRYRANGE setups")
-    print("=" * 68 + "\n")
+    vlog("\n" + "=" * 68)
+    vlog("  Bot armed -- scanning for EXPIRYRANGE setups")
+    vlog("=" * 68 + "\n")
 
     garch_recal_secs = 2 * 3600
 
@@ -2192,7 +2211,7 @@ async def main():
                     prices    = sdata[sym].prices()
                     abs_vol, _, used_g = estimate_abs_vol_per_tick(
                         prices, returns, gr_new, state.last_price[sym])
-                    print(f"[GARCH] {sym}: recalibrated  "
+                    vlog(f"[GARCH] {sym}: recalibrated  "
                           f"abs_vol={abs_vol:.5f}  "
                           f"({'GARCH' if used_g else 'baseline'})")
 
@@ -2224,11 +2243,11 @@ async def main():
                 sym, prices, price_diffs, returns, garch_result, price_now)
             if not gate_ok:
                 fails = {k: v for k, v in gate_info.items() if k.startswith("fail_")}
-                print(f"[Gate] {sym}: blocked -- {fails}")
+                vlog(f"[Gate] {sym}: blocked -- {fails}")
                 continue
 
             # Stage 2: MC optimizer
-            print(f"\n[MC] {sym}: running {MC_SIMULATIONS:,}-sim optimizer "
+            vlog(f"\n[MC] {sym}: running {MC_SIMULATIONS:,}-sim optimizer "
                   f"(ADX={gate_info['adx_val']:.1f} "
                   f"vol_trust={gate_info['vol_trust']:.3f} "
                   f"abs_vol={gate_info['abs_vol']:.5f})...")
@@ -2240,11 +2259,11 @@ async def main():
             dt = time.time() - t0
 
             if not candidates:
-                print(f"[MC] {sym}: no combo cleared win>={MC_REQUIRED_WIN:.0%} "
+                vlog(f"[MC] {sym}: no combo cleared win>={MC_REQUIRED_WIN:.0%} "
                       f"& CI>={MC_REQUIRED_CI:.0%} in {dt:.1f}s -- waiting.")
                 continue
 
-            print(f"[MC] {sym}: {len(candidates)} passing combos in {dt:.1f}s -- "
+            vlog(f"[MC] {sym}: {len(candidates)} passing combos in {dt:.1f}s -- "
                   f"shortlisting top candidates for live EV ranking")
 
             # Stage 2.5: Signal confirmation gate. Requires the top-ranked
@@ -2256,11 +2275,11 @@ async def main():
             top = candidates[0]
             confirmed, cinfo = state.check_confirmation(sym, top)
             if not confirmed:
-                print(f"[Confirm] {sym}: streak {cinfo['streak']}/{cinfo['required']} "
+                vlog(f"[Confirm] {sym}: streak {cinfo['streak']}/{cinfo['required']} "
                       f"dur={top['duration_secs']}s sigma={top['barrier_sigma']:.2f} "
                       f"-- {cinfo.get('reason', 'awaiting next confirm pass')}")
                 continue
-            print(f"[Confirm] {sym}: CONFIRMED after {CONFIRM_REQUIRED} consistent "
+            vlog(f"[Confirm] {sym}: CONFIRMED after {CONFIRM_REQUIRED} consistent "
                   f"passes (dur={top['duration_secs']}s sigma={top['barrier_sigma']:.2f}) "
                   f"-- proceeding to execution")
 
@@ -2274,7 +2293,7 @@ async def main():
             ranked = await rank_candidates_by_ev(client, state, sym, shortlist)
 
             if not ranked:
-                print(f"[EV] {sym}: none of the top {len(shortlist)} candidates "
+                vlog(f"[EV] {sym}: none of the top {len(shortlist)} candidates "
                       f"cleared the live payout floor -- skipping cycle.")
             else:
                 best_cand, best_net_payout, best_ask_price, best_ev = ranked[0]
@@ -2293,7 +2312,7 @@ async def main():
             state.trading_locked = False
 
             if not placed:
-                print(f"[MC] {sym}: no candidate executed this cycle.")
+                vlog(f"[MC] {sym}: no candidate executed this cycle.")
 
         await asyncio.sleep(0.1)
 
@@ -2305,9 +2324,9 @@ if __name__ == "__main__":
     try:
         asyncio.run(main())
     except KeyboardInterrupt:
-        print("\nBot stopped.")
+        vlog("\nBot stopped.")
     except Exception as e:
-        print(f"[main] {type(e).__name__}: {e}")
+        vlog(f"[main] {type(e).__name__}: {e}")
         sys.stdout.flush()
         time.sleep(3)
         os.execv(sys.executable, [sys.executable] + sys.argv)
