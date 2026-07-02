@@ -113,9 +113,9 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 
 # ── Martingale staking (per-symbol, independent streak tracking) ──────────
 MG_ENABLED        = True
-MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
+MG_TRIGGER_LOSSES = 1      # only escalate after this many CONSECUTIVE losses
 MG_MAX_STEPS      = 3      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 1.18
+MG_FACTOR         = 2.0
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
@@ -125,7 +125,7 @@ CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survi
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
-CONFIRM_DUR_TOLERANCE = 60     # candidate is "the same" signal if its duration
+CONFIRM_DUR_TOLERANCE = 75     # candidate is "the same" signal if its duration
                                 # is within this many seconds of the prior pick
 CONFIRM_SIGMA_TOLERANCE = 0.15 # and its barrier_sigma is within this of the prior pick
 
@@ -152,7 +152,7 @@ MC_MAX_WIN_PROB   = MC_FAIR_ODDS_CEIL - 0.03   # small safety margin below the
 MC_BATCH_SIZE    = 75_000
 
 # ── Sweep grids ───────────────────────────────────────────────────────────
-DURATION_CANDIDATES = [120, 300, 240, 420, 180, 360, 480]   # ordered by empirical
+DURATION_CANDIDATES = [120, 150, 180, 300, 240, 420, 180, 360, 480]   # ordered by empirical
                                                               # win-rate priority (120s
                                                               # and 300s were the only
                                                               # net-positive buckets in
@@ -179,7 +179,7 @@ ASYM_SIDE_MIN_FRAC = 0.60
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.004             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.008             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
@@ -188,7 +188,7 @@ DIR_OVERLAY_BIAS_FLOOR = 0.004             # |bias| must be >= this to trigger
                                              # using it would mean overlay never
                                              # fires. 0.020 = the real top-end
                                              # signal on these symbols.
-DIR_OVERLAY_STAKE_FRAC = 0.50              # CALL/PUT stake = 50% of EXPIRYRANGE
+DIR_OVERLAY_STAKE_FRAC = 0.99              # CALL/PUT stake = 50% of EXPIRYRANGE
                                              # stake (secondary position)
 DIR_OVERLAY_MIN_PAYOUT = 0.05              # lower payout floor for CALL/PUT
 
@@ -209,7 +209,7 @@ SYMBOL_CONFIG = {
     },
     "RDBEAR": {
         "ticks_per_sec":     1.0,
-        "max_adx":           11,     # was 18 — never fired; observed live range was
+        "max_adx":           10,     # was 18 — never fired; observed live range was
                                      # 4.3-10.7 (mean 6.9). 8 sits just above the 75th
                                      # percentile (7.67) so it filters genuine trend
                                      # spikes without blocking normal conditions.
