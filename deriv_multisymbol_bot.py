@@ -1,7 +1,7 @@
 """
 Deriv EXPIRYRANGE MC Bot v2 — 1HZ10V + RDBEAR
 ================================================
-Fixes applied vs v1 (confirmed from Railway logs):
+Fixes applied vs v1 (confirmed from Railway logss):
 
   BUG 1 — GARCH vol unit error (ROOT CAUSE of ±0.30 barriers on 9648-priced asset)
     GARCH is fitted on RELATIVE returns scaled by 1000.
