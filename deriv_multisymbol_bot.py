@@ -1,7 +1,7 @@
 """
 Deriv EXPIRYRANGE MC Bot v2 — 1HZ10V + RDBEAR
 ================================================
-Fixes applied vs v1 (confirmed from Railway logss):
+Fixes applied vs v1 (confirmed from Railway logs):
 
   BUG 1 — GARCH vol unit error (ROOT CAUSE of ±0.30 barriers on 9648-priced asset)
     GARCH is fitted on RELATIVE returns scaled by 1000.
@@ -105,6 +105,16 @@ def vlog(*args, **kwargs):
 # ── Contract parameters ───────────────────────────────────────────────────
 BASE_STAKE        = 1.0      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
+# EV floor: rank_candidates_by_ev() only filtered on net_payout size, not on
+# the sign of EV itself -- meaning "cleared the floor" meant "big enough
+# payout to bother with," not "profitable." Every trade in the first live
+# session had negative EV as a result (avg -$0.05) despite a 65.7% win rate,
+# because the $0.20 payout / $1.00 stake ratio needs ~83% win rate just to
+# break even. EV_MIN_REQUIRED is the actual trade/no-trade gate now applied
+# to best_ev before buying -- set above 0 to also cover estimation error in
+# win_prob (the MC estimate is itself noisy, so trading exactly at ev=0 is
+# still a coin flip on whether it's really >=0).
+EV_MIN_REQUIRED   = 0.02      # in stake-currency units, i.e. USD here
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
 MIN_TICKS_FOR_FIT = 200
@@ -113,9 +123,9 @@ GARCH_SCALE       = 1000.0   # scale factor for GARCH fitting on relative return
 
 # ── Martingale staking (per-symbol, independent streak tracking) ──────────
 MG_ENABLED        = True
-MG_TRIGGER_LOSSES = 1      # only escalate after this many CONSECUTIVE losses
+MG_TRIGGER_LOSSES = 2      # only escalate after this many CONSECUTIVE losses
 MG_MAX_STEPS      = 3      # cap — step 4 onward stays at step-3 stake
-MG_FACTOR         = 2.0
+MG_FACTOR         = 1.18
 MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceiling
                                                                        # (safety margin
                                                                        # for rounding)
@@ -125,7 +135,7 @@ CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survi
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
-CONFIRM_DUR_TOLERANCE = 75     # candidate is "the same" signal if its duration
+CONFIRM_DUR_TOLERANCE = 60     # candidate is "the same" signal if its duration
                                 # is within this many seconds of the prior pick
 CONFIRM_SIGMA_TOLERANCE = 0.15 # and its barrier_sigma is within this of the prior pick
 
@@ -152,7 +162,7 @@ MC_MAX_WIN_PROB   = MC_FAIR_ODDS_CEIL - 0.03   # small safety margin below the
 MC_BATCH_SIZE    = 75_000
 
 # ── Sweep grids ───────────────────────────────────────────────────────────
-DURATION_CANDIDATES = [120, 150, 180, 300, 240, 420, 180, 360, 480]   # ordered by empirical
+DURATION_CANDIDATES = [120, 300, 240, 420, 180, 360, 480]   # ordered by empirical
                                                               # win-rate priority (120s
                                                               # and 300s were the only
                                                               # net-positive buckets in
@@ -179,7 +189,7 @@ ASYM_SIDE_MIN_FRAC = 0.60
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.008             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.004             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
@@ -188,9 +198,21 @@ DIR_OVERLAY_BIAS_FLOOR = 0.008             # |bias| must be >= this to trigger
                                              # using it would mean overlay never
                                              # fires. 0.020 = the real top-end
                                              # signal on these symbols.
-DIR_OVERLAY_STAKE_FRAC = 0.99              # CALL/PUT stake = 50% of EXPIRYRANGE
+DIR_OVERLAY_STAKE_FRAC = 0.50              # CALL/PUT stake = 50% of EXPIRYRANGE
                                              # stake (secondary position)
 DIR_OVERLAY_MIN_PAYOUT = 0.05              # lower payout floor for CALL/PUT
+# EV floor for the overlay itself. Previously the overlay fired on ANY bias
+# that cleared DIR_OVERLAY_BIAS_FLOOR + any payout that cleared
+# DIR_OVERLAY_MIN_PAYOUT -- neither check estimates whether the CALL/PUT bet
+# is actually likely to win. Live data: 16 overlay trades, 43.8% win rate,
+# net -$19.61, against a breakeven win rate of ~52% given typical
+# payout/ask ratios -- consistent with firing on bias values too small to
+# carry real signal (DIR_OVERLAY_BIAS_FLOOR=0.004 is below the noise floor
+# established by the alignment-weighting analysis: bias this small barely
+# moves candidate selection either). DIR_OVERLAY_EV_MIN gates on an actual
+# win-probability estimate (see execute_directional_overlay) instead of
+# trusting bias magnitude as a proxy for edge.
+DIR_OVERLAY_EV_MIN     = 0.02              # in stake-currency units (USD)
 
 # ── Per-symbol gate thresholds ────────────────────────────────────────────
 SYMBOL_CONFIG = {
@@ -209,7 +231,7 @@ SYMBOL_CONFIG = {
     },
     "RDBEAR": {
         "ticks_per_sec":     1.0,
-        "max_adx":           10,     # was 18 — never fired; observed live range was
+        "max_adx":           11,     # was 18 — never fired; observed live range was
                                      # 4.3-10.7 (mean 6.9). 8 sits just above the 75th
                                      # percentile (7.67) so it filters genuine trend
                                      # spikes without blocking normal conditions.
@@ -404,6 +426,8 @@ class SupabaseStore:
             "vol_trust":            round(float(rec.get("vol_trust", 0)), 4),
             "hawkes_intensity":     round(float(rec.get("hawkes_val", 0)), 4),
             "n_sims":               int(MC_SIMULATIONS),
+            "regime":               str(rec.get("regime", "UNKNOWN")),
+            "used_bootstrap":       bool(rec.get("used_bootstrap", False)),
         }
         self._insert("bot_expiryrange_log", payload)
 
@@ -1709,6 +1733,8 @@ async def execute_expiryrange(client: DerivClient, state: BotState,
         "drift_total":   candidate.get("drift_total", 0.0),
         "n_steps":       candidate.get("n_steps", 0),
         "ask_price":     ask_price,
+        "regime":        candidate.get("regime", "UNKNOWN"),
+        "used_bootstrap": candidate.get("used_bootstrap", False),
     })
     return won, profit, True
 
@@ -1813,8 +1839,29 @@ async def execute_directional_overlay(client: DerivClient, state: BotState,
                   f"-- skipping")
             return
 
+        # Payout size alone says nothing about whether this CALL/PUT is
+        # likely to win. Estimate a directional win probability from the
+        # same drift/vol-terminal numbers the MC pass already computed for
+        # the parent candidate (drift_total = expected terminal displacement,
+        # vol_terminal = its std dev), then require positive expected value
+        # before firing -- exactly the discipline already applied to the
+        # EXPIRYRANGE side via rank_candidates_by_ev().
+        drift_total  = candidate.get("drift_total", 0.0)
+        vol_terminal = candidate.get("vol_terminal", 0.0)
+        p_up = float(norm.cdf(drift_total / vol_terminal)) if vol_terminal > 1e-9 else 0.5
+        win_prob_dir = p_up if direction == "CALL" else (1.0 - p_up)
+        overlay_ev = win_prob_dir * payout - (1.0 - win_prob_dir) * ask_price
+
+        if overlay_ev < DIR_OVERLAY_EV_MIN:
+            print(f"[Overlay] {symbol}: SKIPPED -- est. win_prob={win_prob_dir:.3f} "
+                  f"(drift_total={drift_total:+.4f} vol_terminal={vol_terminal:.4f}) "
+                  f"gives ev=${overlay_ev:+.4f} < DIR_OVERLAY_EV_MIN=${DIR_OVERLAY_EV_MIN:.2f} "
+                  f"-- payout size alone isn't enough, not firing")
+            return
+
         print(f"[Overlay] {symbol}: proposal OK  payout=${payout:.4f}  "
-              f"ask=${ask_price:.4f}  est_net=${net_profit_est:.4f}")
+              f"ask=${ask_price:.4f}  est_net=${net_profit_est:.4f}  "
+              f"win_prob={win_prob_dir:.3f}  ev=${overlay_ev:+.4f}")
 
     except Exception as e:
         print(f"[Overlay] {symbol} proposal exception: {e} -- skipping overlay")
@@ -2297,17 +2344,23 @@ async def main():
                       f"cleared the live payout floor -- skipping cycle.")
             else:
                 best_cand, best_net_payout, best_ask_price, best_ev = ranked[0]
-                print(f"[EV] {sym}: selected best-EV candidate -- "
-                      f"dur={best_cand['duration_secs']}s "
-                      f"sigma={best_cand['barrier_sigma']:.2f} "
-                      f"win={best_cand['win_prob']:.3f} "
-                      f"net_payout=${best_net_payout:.4f} "
-                      f"ev=${best_ev:+.4f}  "
-                      f"({len(ranked)}/{len(shortlist)} candidates cleared the floor)")
-                won, profit, ok = await execute_expiryrange(
-                    client, state, sym, best_cand, gate_info, store,
-                    cached_proposal=(best_net_payout, best_ask_price))
-                placed = ok
+                if best_ev < EV_MIN_REQUIRED:
+                    vlog(f"[EV] {sym}: best candidate ev=${best_ev:+.4f} is below "
+                          f"EV_MIN_REQUIRED=${EV_MIN_REQUIRED:.2f} -- skipping cycle "
+                          f"rather than taking a negative/marginal-EV trade "
+                          f"({len(ranked)}/{len(shortlist)} cleared the payout floor)")
+                else:
+                    print(f"[EV] {sym}: selected best-EV candidate -- "
+                          f"dur={best_cand['duration_secs']}s "
+                          f"sigma={best_cand['barrier_sigma']:.2f} "
+                          f"win={best_cand['win_prob']:.3f} "
+                          f"net_payout=${best_net_payout:.4f} "
+                          f"ev=${best_ev:+.4f}  "
+                          f"({len(ranked)}/{len(shortlist)} candidates cleared the floor)")
+                    won, profit, ok = await execute_expiryrange(
+                        client, state, sym, best_cand, gate_info, store,
+                        cached_proposal=(best_net_payout, best_ask_price))
+                    placed = ok
 
             state.trading_locked = False
 
