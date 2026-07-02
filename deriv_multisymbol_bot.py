@@ -177,7 +177,7 @@ DIR_OVERLAY_MIN_PAYOUT = 0.05              # lower payout floor for CALL/PUT
 SYMBOL_CONFIG = {
     "1HZ10V": {
         "ticks_per_sec":     1.0,
-        "max_adx":           9,     # was 22 — never fired; observed live range was
+        "max_adx":           8,     # was 22 — never fired; observed live range was
                                      # 5.1-9.2 (mean 7.1). 9 sits just above the 75th
                                      # percentile (7.68) so it filters genuine trend
                                      # spikes without blocking normal conditions.
