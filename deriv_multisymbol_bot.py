@@ -84,7 +84,7 @@ SUPABASE_KEY = os.getenv("SUPABASE_KEY", "")
 SYMBOLS = ["1HZ10V", "RDBEAR"]
 
 # ── Contract parameters ───────────────────────────────────────────────────
-BASE_STAKE        = 0.35      # Deriv minimum
+BASE_STAKE        = 1.0      # Deriv minimum
 MIN_NET_PAYOUT    = 0.182     # 52% of $0.35 — enforced via proposal API
 WATCHDOG_TIMEOUT  = 15 * 60  # 15 min — accounts for GARCH + bootstrap time
 HISTORY_BOOTSTRAP = 5000
@@ -102,7 +102,7 @@ MG_MAX_STAKE      = BASE_STAKE * (MG_FACTOR ** MG_MAX_STEPS) * 1.05  # hard ceil
                                                                        # for rounding)
 
 # ── Signal confirmation (reduces trade frequency / false positives) ───────
-CONFIRM_REQUIRED      = 3      # consecutive passes the top candidate must survive
+CONFIRM_REQUIRED      = 2      # consecutive passes the top candidate must survive
 CONFIRM_MIN_GAP_SECS  = 60     # minimum time between confirmation checks
 CONFIRM_MAX_AGE_SECS  = 600    # abandon a confirmation streak if it's been open
                                 # this long without completing (stale signal)
@@ -130,7 +130,7 @@ MC_MAX_WIN_PROB   = MC_FAIR_ODDS_CEIL - 0.03   # small safety margin below the
                                                  # theoretical cliff, since real
                                                  # Deriv pricing includes house
                                                  # margin (worse than fair odds)
-MC_BATCH_SIZE    = 25_000
+MC_BATCH_SIZE    = 75_000
 
 # ── Sweep grids ───────────────────────────────────────────────────────────
 DURATION_CANDIDATES = [120, 300, 240, 420, 180, 360, 480]   # ordered by empirical
@@ -152,7 +152,7 @@ BIAS_MAX           = 0.35    # cap bias magnitude (prevents degenerate barriers)
 # Ratio > 1.0 = that side is wider than the symmetric baseline.
 ASYM_RATIO_GRID    = [0.70, 0.80, 0.90, 1.00, 1.10, 1.20, 1.30]
 # Neither side can be less than this fraction of the symmetric barrier_abs
-ASYM_SIDE_MIN_FRAC = 0.50
+ASYM_SIDE_MIN_FRAC = 0.60
 
 # ── Directional overlay (CALL/PUT alongside EXPIRYRANGE) ─────────────────
 # Only fires when |bias| hits BIAS_MAX exactly (saturated cap = max observed
@@ -160,7 +160,7 @@ ASYM_SIDE_MIN_FRAC = 0.50
 # these mean-reverting synthetic indices — data showed |bias| barely reached
 # 0.025 on average; only cap-saturated events are worth betting directionally.
 DIR_OVERLAY_ENABLED    = True
-DIR_OVERLAY_BIAS_FLOOR = 0.020             # |bias| must be >= this to trigger
+DIR_OVERLAY_BIAS_FLOOR = 0.004             # |bias| must be >= this to trigger
                                              # the overlay. Derived from actual
                                              # trade data (129 trades): max
                                              # observed bias was 0.0254, only 2
@@ -190,7 +190,7 @@ SYMBOL_CONFIG = {
     },
     "RDBEAR": {
         "ticks_per_sec":     1.0,
-        "max_adx":           8,     # was 18 — never fired; observed live range was
+        "max_adx":           11,     # was 18 — never fired; observed live range was
                                      # 4.3-10.7 (mean 6.9). 8 sits just above the 75th
                                      # percentile (7.67) so it filters genuine trend
                                      # spikes without blocking normal conditions.
